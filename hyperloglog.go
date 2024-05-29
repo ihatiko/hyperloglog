@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 )
 
 const (
@@ -22,6 +23,7 @@ type Sketch struct {
 	b          uint8
 	m          uint32
 	alpha      float64
+	mt         sync.Mutex
 	tmpSet     set
 	sparseList *compressedList
 	regs       *registers
@@ -68,6 +70,7 @@ func newSketch(precision uint8, sparse bool) (*Sketch, error) {
 		m:     m,
 		p:     precision,
 		alpha: alpha(float64(m)),
+		mt:    sync.Mutex{},
 	}
 	if sparse {
 		s.tmpSet = set{}
@@ -84,6 +87,8 @@ func (sk *Sketch) sparse() bool {
 
 // Clone returns a deep copy of sk.
 func (sk *Sketch) Clone() *Sketch {
+	sk.mt.Lock()
+	defer sk.mt.Unlock()
 	return &Sketch{
 		b:          sk.b,
 		p:          sk.p,
@@ -92,6 +97,7 @@ func (sk *Sketch) Clone() *Sketch {
 		tmpSet:     sk.tmpSet.Clone(),
 		sparseList: sk.sparseList.Clone(),
 		regs:       sk.regs.clone(),
+		mt:         sk.mt,
 	}
 }
 
@@ -216,6 +222,8 @@ func (sk *Sketch) Insert(e []byte) bool {
 
 // InsertHash adds hash x to sketch
 func (sk *Sketch) InsertHash(x uint64) bool {
+	sk.mt.Lock()
+	defer sk.mt.Unlock()
 	if sk.sparse() {
 		changed := sk.tmpSet.add(encodeHash(x, sk.p, pp))
 		if !changed {

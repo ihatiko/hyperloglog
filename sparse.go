@@ -37,8 +37,7 @@ func decodeHash(k uint32, p, pp uint8) (uint32, uint8) {
 type set map[uint32]struct{}
 
 func (s set) add(v uint32) bool {
-	_, ok := s[v]
-	if ok {
+	if _, ok := s[v]; ok {
 		return false
 	}
 	s[v] = struct{}{}
