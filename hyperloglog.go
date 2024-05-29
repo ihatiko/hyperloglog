@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 )
 
 const (
@@ -18,11 +19,12 @@ const (
 // Sketch is a HyperLogLog data-structure for the count-distinct problem,
 // approximating the number of distinct elements in a multiset.
 type Sketch struct {
+	mt         sync.Mutex
 	p          uint8
 	b          uint8
 	m          uint32
 	alpha      float64
-	tmpSet     set
+	tmpSet     *set
 	sparseList *compressedList
 	regs       *registers
 }
@@ -68,9 +70,10 @@ func newSketch(precision uint8, sparse bool) (*Sketch, error) {
 		m:     m,
 		p:     precision,
 		alpha: alpha(float64(m)),
+		mt:    sync.Mutex{},
 	}
 	if sparse {
-		s.tmpSet = set{}
+		s.tmpSet = &set{}
 		s.sparseList = newCompressedList(0)
 	} else {
 		s.regs = newRegisters(m)
@@ -92,12 +95,13 @@ func (sk *Sketch) Clone() *Sketch {
 		tmpSet:     sk.tmpSet.Clone(),
 		sparseList: sk.sparseList.Clone(),
 		regs:       sk.regs.clone(),
+		mt:         sk.mt,
 	}
 }
 
 // Converts to normal if the sparse list is too large.
 func (sk *Sketch) maybeToNormal() {
-	if uint32(len(sk.tmpSet))*100 > sk.m {
+	if uint32(len(sk.tmpSet.M))*100 > sk.m {
 		sk.mergeSparse()
 		if uint32(sk.sparseList.Len()) > sk.m {
 			sk.toNormal()
@@ -120,7 +124,7 @@ func (sk *Sketch) Merge(other *Sketch) error {
 	}
 
 	if sk.sparse() && other.sparse() {
-		for k := range other.tmpSet {
+		for k := range other.tmpSet.M {
 			sk.tmpSet.add(k)
 		}
 		for iter := other.sparseList.Iter(); iter.HasNext(); {
@@ -135,7 +139,7 @@ func (sk *Sketch) Merge(other *Sketch) error {
 	}
 
 	if cpOther.sparse() {
-		for k := range cpOther.tmpSet {
+		for k := range cpOther.tmpSet.M {
 			i, r := decodeHash(k, cpOther.p, pp)
 			sk.insert(i, r)
 		}
@@ -169,7 +173,7 @@ func (sk *Sketch) Merge(other *Sketch) error {
 
 // Convert from sparse Sketch to dense Sketch.
 func (sk *Sketch) toNormal() {
-	if len(sk.tmpSet) > 0 {
+	if len(sk.tmpSet.M) > 0 {
 		sk.mergeSparse()
 	}
 
@@ -221,7 +225,7 @@ func (sk *Sketch) InsertHash(x uint64) bool {
 		if !changed {
 			return false
 		}
-		if uint32(len(sk.tmpSet))*100 > sk.m/2 {
+		if uint32(len(sk.tmpSet.M))*100 > sk.m/2 {
 			sk.mergeSparse()
 			if uint32(sk.sparseList.Len()) > sk.m/2 {
 				sk.toNormal()
@@ -262,17 +266,17 @@ func (sk *Sketch) Estimate() uint64 {
 }
 
 func (sk *Sketch) mergeSparse() {
-	if len(sk.tmpSet) == 0 {
+	if len(sk.tmpSet.M) == 0 {
 		return
 	}
 
-	keys := make(uint64Slice, 0, len(sk.tmpSet))
-	for k := range sk.tmpSet {
+	keys := make(uint64Slice, 0, len(sk.tmpSet.M))
+	for k := range sk.tmpSet.M {
 		keys = append(keys, k)
 	}
 	sort.Sort(keys)
 
-	newList := newCompressedList(4*len(sk.tmpSet) + len(sk.sparseList.b))
+	newList := newCompressedList(4*len(sk.tmpSet.M) + len(sk.sparseList.b))
 	for iter, i := sk.sparseList.Iter(), 0; iter.HasNext() || i < len(keys); {
 		if !iter.HasNext() {
 			newList.Append(keys[i])
@@ -298,7 +302,7 @@ func (sk *Sketch) mergeSparse() {
 	}
 
 	sk.sparseList = newList
-	sk.tmpSet = set{}
+	sk.tmpSet = &set{}
 }
 
 // MarshalBinary implements the encoding.BinaryMarshaler interface.
@@ -373,7 +377,7 @@ func (sk *Sketch) UnmarshalBinary(data []byte) error {
 	sparse := data[3] == byte(1)
 
 	// Make a newSketch Sketch if the precision doesn't match or if the Sketch was used
-	if sk.p != p || sk.regs != nil || len(sk.tmpSet) > 0 || (sk.sparseList != nil && sk.sparseList.Len() > 0) {
+	if sk.p != p || sk.regs != nil || len(sk.tmpSet.M) > 0 || (sk.sparseList != nil && sk.sparseList.Len() > 0) {
 		newh, err := newSketch(p, sparse)
 		if err != nil {
 			return err
@@ -389,16 +393,19 @@ func (sk *Sketch) UnmarshalBinary(data []byte) error {
 
 		// Unmarshal the tmp_set.
 		tssz := binary.BigEndian.Uint32(data[4:8])
-		sk.tmpSet = make(map[uint32]struct{}, tssz)
-
+		sk.tmpSet = &set{
+			M:  make(map[uint32]struct{}, tssz),
+			Mt: sync.RWMutex{},
+		}
+		sk.tmpSet.Mt.Lock()
 		// We need to unmarshal tssz values in total, and each value requires us
 		// to read 4 bytes.
 		tsLastByte := int((tssz * 4) + 8)
 		for i := 8; i < tsLastByte; i += 4 {
 			k := binary.BigEndian.Uint32(data[i : i+4])
-			sk.tmpSet[k] = struct{}{}
+			sk.tmpSet.M[k] = struct{}{}
 		}
-
+		sk.tmpSet.Mt.Unlock()
 		// Unmarshal the sparse Sketch.
 		return sk.sparseList.UnmarshalBinary(data[tsLastByte:])
 	}

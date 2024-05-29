@@ -2,6 +2,7 @@ package hyperloglog
 
 import (
 	"math/bits"
+	"sync"
 )
 
 func getIndex(k uint32, p, pp uint8) uint32 {
@@ -34,37 +35,41 @@ func decodeHash(k uint32, p, pp uint8) (uint32, uint8) {
 	return getIndex(k, p, pp), r
 }
 
-type set map[uint32]struct{}
+type set struct {
+	M  map[uint32]struct{}
+	Mt sync.RWMutex
+}
 
 func (s set) add(v uint32) bool {
-	_, ok := s[v]
-	if ok {
+	s.Mt.Lock()
+	defer s.Mt.Unlock()
+	if _, ok := s.M[v]; ok {
 		return false
 	}
-	s[v] = struct{}{}
+	s.M[v] = struct{}{}
 	return true
 }
 
-func (s set) Clone() set {
-	if s == nil {
+func (s set) Clone() *set {
+	if s.M == nil {
 		return nil
 	}
 
-	newS := make(map[uint32]struct{}, len(s))
-	for k, v := range s {
+	newS := make(map[uint32]struct{}, len(s.M))
+	for k, v := range s.M {
 		newS[k] = v
 	}
-	return newS
+	return &set{Mt: s.Mt, M: newS}
 }
 
 func (s set) MarshalBinary() (data []byte, err error) {
 	// 4 bytes for the size of the set, and 4 bytes for each key.
 	// list.
-	data = make([]byte, 0, 4+(4*len(s)))
+	data = make([]byte, 0, 4+(4*len(s.M)))
 
 	// Length of the set. We only need 32 bits because the size of the set
 	// couldn't exceed that on 32 bit architectures.
-	sl := len(s)
+	sl := len(s.M)
 	data = append(data, []byte{
 		byte(sl >> 24),
 		byte(sl >> 16),
@@ -73,7 +78,7 @@ func (s set) MarshalBinary() (data []byte, err error) {
 	}...)
 
 	// Marshal each element in the set.
-	for k := range s {
+	for k := range s.M {
 		data = append(data, []byte{
 			byte(k >> 24),
 			byte(k >> 16),

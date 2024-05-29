@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
@@ -470,7 +471,7 @@ func TestHLLTC_Error(t *testing.T) {
 
 func TestHLLTC_Marshal_Unmarshal_Sparse(t *testing.T) {
 	sk, _ := newSketch(4, true)
-	sk.tmpSet = map[uint32]struct{}{26: {}, 40: {}}
+	sk.tmpSet = &set{Mt: sync.RWMutex{}, M: map[uint32]struct{}{26: {}, 40: {}}}
 
 	// Add a bunch of values to the sparse representation.
 	for i := 0; i < 10; i++ {
@@ -773,7 +774,7 @@ func genData(num int) [][]byte {
 			panic(fmt.Errorf("only %d bytes generated", n))
 		}
 		copiedBuf := make([]byte, 8)
-		copy(copiedBuf, buf)  // copy the contents of buf to copiedBuf
+		copy(copiedBuf, buf) // copy the contents of buf to copiedBuf
 		out = append(out, copiedBuf)
 	}
 	if len(out) != num {
