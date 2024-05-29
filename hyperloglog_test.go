@@ -8,8 +8,6 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
 func estimateError(got, exp uint64) float64 {
@@ -468,192 +466,6 @@ func TestHLLTC_Error(t *testing.T) {
 	}
 }
 
-func TestHLLTC_Marshal_Unmarshal_Sparse(t *testing.T) {
-	sk, _ := newSketch(4, true)
-	sk.tmpSet = map[uint32]struct{}{26: {}, 40: {}}
-
-	// Add a bunch of values to the sparse representation.
-	for i := 0; i < 10; i++ {
-		sk.sparseList.Append(uint32(rand.Int()))
-	}
-
-	data, err := sk.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Peeking at the first byte should reveal the version.
-	if got, exp := data[0], byte(1); got != exp {
-		t.Fatalf("got byte %v, expected %v", got, exp)
-	}
-
-	var res Sketch
-	if err := res.UnmarshalBinary(data); err != nil {
-		t.Fatal(err)
-	}
-
-	// reflect.DeepEqual will always return false when comparing non-nil
-	// functions, so we'll set them to nil.
-	if got, exp := &res, sk; !reflect.DeepEqual(got, exp) {
-		t.Fatalf("got %v, wanted %v", spew.Sdump(got), spew.Sdump(exp))
-	}
-}
-
-func TestHLLTC_Marshal_Unmarshal_Dense(t *testing.T) {
-	sk, _ := newSketch(4, false)
-
-	// Add a bunch of values to the dense representation.
-	for i := uint32(0); i < 10; i++ {
-		sk.regs.set(i, uint8(rand.Int()))
-	}
-
-	data, err := sk.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Peeking at the first byte should reveal the version.
-	if got, exp := data[0], byte(1); got != exp {
-		t.Fatalf("got byte %v, expected %v", got, exp)
-	}
-
-	var res Sketch
-	if err := res.UnmarshalBinary(data); err != nil {
-		t.Fatal(err)
-	}
-
-	// reflect.DeepEqual will always return false when comparing non-nil
-	// functions, so we'll set them to nil.
-	if got, exp := &res, sk; !reflect.DeepEqual(got, exp) {
-		t.Fatalf("got %v, wanted %v", spew.Sdump(got), spew.Sdump(exp))
-	}
-}
-
-// Tests that a sketch can be serialised / unserialised and keep an accurate
-// cardinality estimate.
-func TestHLLTC_Marshal_Unmarshal_Count(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping test in short mode")
-	}
-
-	count := make(map[string]struct{}, 1000000)
-	sk, _ := newSketch(16, true)
-
-	buf := make([]byte, 8)
-	for i := 0; i < 1000000; i++ {
-		if _, err := crand.Read(buf); err != nil {
-			panic(err)
-		}
-
-		count[string(buf)] = struct{}{}
-
-		// Add to the sketch.
-		sk.Insert(buf)
-	}
-
-	gotC := sk.Estimate()
-	epsilon := 15000 // 1.5%
-	if got, exp := math.Abs(float64(int(gotC)-len(count))), epsilon; int(got) > exp {
-		t.Fatalf("error was %v for estimation %d and true cardinality %d", got, gotC, len(count))
-	}
-
-	// Serialise the sketch.
-	sketch, err := sk.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Deserialise.
-	sk = &Sketch{}
-	if err := sk.UnmarshalBinary(sketch); err != nil {
-		t.Fatal(err)
-	}
-
-	// The count should be the same
-	oldC := gotC
-	if got, exp := sk.Estimate(), oldC; got != exp {
-		t.Fatalf("got %d, expected %d", got, exp)
-	}
-
-	// Add some more values.
-	for i := 0; i < 1000000; i++ {
-		if _, err := crand.Read(buf); err != nil {
-			panic(err)
-		}
-
-		count[string(buf)] = struct{}{}
-
-		// Add to the sketch.
-		sk.Insert(buf)
-	}
-
-	// The sketch should still be working correctly.
-	gotC = sk.Estimate()
-	epsilon = 30000 // 1.5%
-	if got, exp := math.Abs(float64(int(gotC)-len(count))), epsilon; int(got) > exp {
-		t.Fatalf("error was %v for estimation %d and true cardinality %d", got, gotC, len(count))
-	}
-}
-
-// Tests that a sketch will be used in Unmarshal if it is unused
-func TestHLLTC_Marshal_Unmarshal_Reuse(t *testing.T) {
-	sk, _ := newSketch(4, true)
-	// Add a bunch of values to the sparse representation.
-	for i := 0; i < 10; i++ {
-		sk.sparseList.Append(uint32(rand.Int()))
-	}
-	data, err := sk.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, _ := newSketch(4, true)
-	// Change the "m" here because it's not adjusted so it'll allow us to
-	// determine if newSketch was called
-	res.m = 1
-	if err := res.UnmarshalBinary(data); err != nil {
-		t.Fatal(err)
-	}
-
-	// Compare the "m" to make sure it's the same
-	if res.m != 1 {
-		t.Fatalf("UnmarshalBinary created a newSketch Sketch")
-	}
-
-	// If we re-use the same sketch, newSketch should be called
-	if err := res.UnmarshalBinary(data); err != nil {
-		t.Fatal(err)
-	}
-
-	// Compare the "m" to make sure it was changed
-	if res.m == 1 {
-		t.Fatalf("UnmarshalBinary did not create a newSketch Sketch")
-	}
-}
-
-func TestHLLTC_Unmarshal_ErrorTooShort(t *testing.T) {
-	if err := (&Sketch{}).UnmarshalBinary(nil); err != ErrorTooShort {
-		t.Fatalf("UnmarshalBinary(nil) should fail with ErrorTooShort: %s", err)
-	}
-
-	b := []byte{
-		// precision:14, sparse:true, tmpSet:empty,
-		// sparseList:{count:1, last:0, sz:1, ...}
-		0x01, 0x0e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x01, 0x7f,
-	}
-	if err := (&Sketch{}).UnmarshalBinary(b); err != nil {
-		t.Fatalf("UnmarshalBinary failed: %s", err)
-	}
-	for i := 0; i < len(b)-1; i++ {
-		sk := &Sketch{}
-		err := sk.UnmarshalBinary(b[0:i])
-		if err != ErrorTooShort {
-			t.Fatalf("should fail for incomplete bytes: i=%d", i)
-		}
-	}
-}
-
 func TestHLLTC_Clone(t *testing.T) {
 	sk1 := NewTestSketch(16)
 
@@ -773,7 +585,7 @@ func genData(num int) [][]byte {
 			panic(fmt.Errorf("only %d bytes generated", n))
 		}
 		copiedBuf := make([]byte, 8)
-		copy(copiedBuf, buf)  // copy the contents of buf to copiedBuf
+		copy(copiedBuf, buf) // copy the contents of buf to copiedBuf
 		out = append(out, copiedBuf)
 	}
 	if len(out) != num {

@@ -1,7 +1,5 @@
 package hyperloglog
 
-import "encoding/binary"
-
 // Original author of this file is github.com/clarkduvall/hyperloglog
 type iterable interface {
 	decode(i int, last uint32) (uint32, int)
@@ -50,57 +48,6 @@ func (v *compressedList) Clone() *compressedList {
 	newV.b = make(variableLengthList, len(v.b))
 	copy(newV.b, v.b)
 	return newV
-}
-
-func (v *compressedList) MarshalBinary() (data []byte, err error) {
-	// Marshal the variableLengthList
-	bdata, err := v.b.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-
-	// At least 4 bytes for the two fixed sized values plus the size of bdata.
-	data = make([]byte, 0, 4+4+len(bdata))
-
-	// Marshal the count and last values.
-	data = append(data, []byte{
-		// Number of items in the list.
-		byte(v.count >> 24),
-		byte(v.count >> 16),
-		byte(v.count >> 8),
-		byte(v.count),
-		// The last item in the list.
-		byte(v.last >> 24),
-		byte(v.last >> 16),
-		byte(v.last >> 8),
-		byte(v.last),
-	}...)
-
-	// Append the list
-	return append(data, bdata...), nil
-}
-
-func (v *compressedList) UnmarshalBinary(data []byte) error {
-	if len(data) < 12 {
-		return ErrorTooShort
-	}
-
-	// Set the count.
-	v.count, data = binary.BigEndian.Uint32(data[:4]), data[4:]
-
-	// Set the last value.
-	v.last, data = binary.BigEndian.Uint32(data[:4]), data[4:]
-
-	// Set the list.
-	sz, data := binary.BigEndian.Uint32(data[:4]), data[4:]
-	v.b = make([]uint8, sz)
-	if uint32(len(data)) < sz {
-		return ErrorTooShort
-	}
-	for i := uint32(0); i < sz; i++ {
-		v.b[i] = data[i]
-	}
-	return nil
 }
 
 func newCompressedList(capacity int) *compressedList {

@@ -1,12 +1,12 @@
 package hyperloglog
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"sync"
+	"time"
 )
 
 const (
@@ -27,6 +27,8 @@ type Sketch struct {
 	tmpSet     set
 	sparseList *compressedList
 	regs       *registers
+	ResetAt    int64
+	isSparse   bool
 }
 
 // New returns a HyperLogLog Sketch with 2^14 registers (precision 14)
@@ -67,10 +69,12 @@ func newSketch(precision uint8, sparse bool) (*Sketch, error) {
 	}
 	m := uint32(math.Pow(2, float64(precision)))
 	s := &Sketch{
-		m:     m,
-		p:     precision,
-		alpha: alpha(float64(m)),
-		mt:    sync.Mutex{},
+		m:        m,
+		p:        precision,
+		alpha:    alpha(float64(m)),
+		mt:       sync.Mutex{},
+		ResetAt:  time.Now().Unix(),
+		isSparse: sparse,
 	}
 	if sparse {
 		s.tmpSet = set{}
@@ -87,8 +91,6 @@ func (sk *Sketch) sparse() bool {
 
 // Clone returns a deep copy of sk.
 func (sk *Sketch) Clone() *Sketch {
-	sk.mt.Lock()
-	defer sk.mt.Unlock()
 	return &Sketch{
 		b:          sk.b,
 		p:          sk.p,
@@ -224,6 +226,10 @@ func (sk *Sketch) Insert(e []byte) bool {
 func (sk *Sketch) InsertHash(x uint64) bool {
 	sk.mt.Lock()
 	defer sk.mt.Unlock()
+	today := time.Now().Unix()
+	if sk.ResetAt > today {
+		sk, _ = newSketch(sk.p, sk.isSparse)
+	}
 	if sk.sparse() {
 		changed := sk.tmpSet.add(encodeHash(x, sk.p, pp))
 		if !changed {
@@ -244,6 +250,8 @@ func (sk *Sketch) InsertHash(x uint64) bool {
 
 // Estimate returns the cardinality of the Sketch
 func (sk *Sketch) Estimate() uint64 {
+	sk.mt.Lock()
+	defer sk.mt.Unlock()
 	if sk.sparse() {
 		sk.mergeSparse()
 		return uint64(linearCount(mp, mp-sk.sparseList.count))
@@ -307,126 +315,4 @@ func (sk *Sketch) mergeSparse() {
 
 	sk.sparseList = newList
 	sk.tmpSet = set{}
-}
-
-// MarshalBinary implements the encoding.BinaryMarshaler interface.
-func (sk *Sketch) MarshalBinary() (data []byte, err error) {
-	// Marshal a version marker.
-	data = append(data, version)
-	// Marshal p.
-	data = append(data, sk.p)
-	// Marshal b
-	data = append(data, sk.b)
-
-	if sk.sparse() {
-		// It's using the sparse Sketch.
-		data = append(data, byte(1))
-
-		// Add the tmp_set
-		tsdata, err := sk.tmpSet.MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-		data = append(data, tsdata...)
-
-		// Add the sparse Sketch
-		sdata, err := sk.sparseList.MarshalBinary()
-		if err != nil {
-			return nil, err
-		}
-		return append(data, sdata...), nil
-	}
-
-	// It's using the dense Sketch.
-	data = append(data, byte(0))
-
-	// Add the dense sketch Sketch.
-	sz := len(sk.regs.tailcuts)
-	data = append(data, []byte{
-		byte(sz >> 24),
-		byte(sz >> 16),
-		byte(sz >> 8),
-		byte(sz),
-	}...)
-
-	// Marshal each element in the list.
-	for i := 0; i < len(sk.regs.tailcuts); i++ {
-		data = append(data, byte(sk.regs.tailcuts[i]))
-	}
-
-	return data, nil
-}
-
-// ErrorTooShort is an error that UnmarshalBinary try to parse too short
-// binary.
-var ErrorTooShort = errors.New("too short binary")
-
-// UnmarshalBinary implements the encoding.BinaryUnmarshaler interface.
-func (sk *Sketch) UnmarshalBinary(data []byte) error {
-	if len(data) < 8 {
-		return ErrorTooShort
-	}
-
-	// Unmarshal version. We may need this in the future if we make
-	// non-compatible changes.
-	_ = data[0]
-
-	// Unmarshal p.
-	p := data[1]
-
-	// Unmarshal b.
-	sk.b = data[2]
-
-	// Determine if we need a sparse Sketch
-	sparse := data[3] == byte(1)
-
-	// Make a newSketch Sketch if the precision doesn't match or if the Sketch was used
-	if sk.p != p || sk.regs != nil || len(sk.tmpSet) > 0 || (sk.sparseList != nil && sk.sparseList.Len() > 0) {
-		newh, err := newSketch(p, sparse)
-		if err != nil {
-			return err
-		}
-		newh.b = sk.b
-		*sk = *newh
-	}
-
-	// h is now initialised with the correct p. We just need to fill the
-	// rest of the details out.
-	if sparse {
-		// Using the sparse Sketch.
-
-		// Unmarshal the tmp_set.
-		tssz := binary.BigEndian.Uint32(data[4:8])
-		sk.tmpSet = make(map[uint32]struct{}, tssz)
-
-		// We need to unmarshal tssz values in total, and each value requires us
-		// to read 4 bytes.
-		tsLastByte := int((tssz * 4) + 8)
-		for i := 8; i < tsLastByte; i += 4 {
-			k := binary.BigEndian.Uint32(data[i : i+4])
-			sk.tmpSet[k] = struct{}{}
-		}
-
-		// Unmarshal the sparse Sketch.
-		return sk.sparseList.UnmarshalBinary(data[tsLastByte:])
-	}
-
-	// Using the dense Sketch.
-	sk.sparseList = nil
-	sk.tmpSet = nil
-	dsz := binary.BigEndian.Uint32(data[4:8])
-	sk.regs = newRegisters(dsz * 2)
-	data = data[8:]
-
-	for i, val := range data {
-		sk.regs.tailcuts[i] = reg(val)
-		if uint8(sk.regs.tailcuts[i]<<4>>4) > 0 {
-			sk.regs.nz--
-		}
-		if uint8(sk.regs.tailcuts[i]>>4) > 0 {
-			sk.regs.nz--
-		}
-	}
-
-	return nil
 }
